@@ -7,17 +7,23 @@ import (
 )
 
 // docBuilder accumulates plain text and style requests for a Google Doc.
-// Strategy: first pass builds the full text content; second pass applies styles.
-// This avoids the offset-shifting problem with interleaved inserts.
 //
-// IMPORTANT: Google Docs API uses UTF-16 code unit offsets for indexing,
-// not byte offsets. We track charCount separately to match.
+// Strategy: three phases in a single batchUpdate:
+//   1. Insert all text at index 1 (tables get a \n placeholder)
+//   2. Apply paragraph and text styles
+//   3. For each table (reverse order): delete placeholder, insert native table, fill cells
+//
+// Phase 3 runs after styles are applied, so table insertion shifting indices
+// doesn't affect already-applied styles (styles attach to characters, not indices).
+//
+// IMPORTANT: Google Docs API uses UTF-16 code unit offsets for indexing.
 type docBuilder struct {
-	text       []byte          // accumulated plain text (UTF-8)
-	charCount  int64           // accumulated UTF-16 code unit count
-	styles     []styleRange    // pending style applications
+	text       []byte           // accumulated plain text (UTF-8)
+	charCount  int64            // accumulated UTF-16 code unit count
+	styles     []styleRange     // pending style applications
 	paraStyles []paraStyleRange // pending paragraph style applications
-	source     []byte          // original markdown source
+	tables     []tableInfo      // pending table insertions
+	source     []byte           // original markdown source
 }
 
 type styleRange struct {
@@ -29,9 +35,17 @@ type styleRange struct {
 }
 
 type paraStyleRange struct {
-	start     int64
-	end       int64
+	start      int64
+	end        int64
 	namedStyle string
+}
+
+// tableInfo records a table's position and content for deferred insertion.
+type tableInfo struct {
+	charPos int64      // position of the \n placeholder (UTF-16 offset from start)
+	rows    int64
+	cols    int64
+	cells   [][]string // [row][col] = cell text
 }
 
 func newDocBuilder(source []byte) *docBuilder {
@@ -51,13 +65,11 @@ func (b *docBuilder) currentIndex() int64 {
 }
 
 // utf16Len returns the number of UTF-16 code units needed to represent s.
-// Characters in the Basic Multilingual Plane (U+0000 to U+FFFF) use 1 unit.
-// Characters above U+FFFF (supplementary planes) use 2 units (surrogate pair).
 func utf16Len(s string) int64 {
 	var count int64
 	for _, r := range s {
 		if r >= 0x10000 {
-			count += 2 // surrogate pair
+			count += 2
 		} else {
 			count += 1
 		}
@@ -88,7 +100,7 @@ func (b *docBuilder) addParaStyle(start, end int64, namedStyle string) {
 func (b *docBuilder) build() []*docs.Request {
 	var requests []*docs.Request
 
-	// First request: insert all text at index 1
+	// Phase 1: insert all text at index 1 (tables are \n placeholders)
 	if len(b.text) > 0 {
 		requests = append(requests, &docs.Request{
 			InsertText: &docs.InsertTextRequest{
@@ -98,9 +110,8 @@ func (b *docBuilder) build() []*docs.Request {
 		})
 	}
 
-	// Apply paragraph styles (headings)
+	// Phase 2: apply paragraph styles (headings)
 	for _, ps := range b.paraStyles {
-		// +1 because doc indices are 1-based after insertion at index 1
 		requests = append(requests, &docs.Request{
 			UpdateParagraphStyle: &docs.UpdateParagraphStyleRequest{
 				Range: &docs.Range{
@@ -115,7 +126,7 @@ func (b *docBuilder) build() []*docs.Request {
 		})
 	}
 
-	// Apply text styles (bold, italic, links)
+	// Phase 2b: apply text styles (bold, italic, links)
 	for _, s := range b.styles {
 		style := &docs.TextStyle{}
 		fields := ""
@@ -149,6 +160,57 @@ func (b *docBuilder) build() []*docs.Request {
 		})
 	}
 
+	// Phase 3: insert native tables (reverse order to avoid shifting earlier tables)
+	for i := len(b.tables) - 1; i >= 0; i-- {
+		tbl := b.tables[i]
+		// +1 for 1-based doc indexing
+		insertIdx := tbl.charPos + 1
+
+		// Delete the \n placeholder
+		requests = append(requests, &docs.Request{
+			DeleteContentRange: &docs.DeleteContentRangeRequest{
+				Range: &docs.Range{
+					StartIndex: insertIdx,
+					EndIndex:   insertIdx + 1,
+				},
+			},
+		})
+
+		// Insert table
+		requests = append(requests, &docs.Request{
+			InsertTable: &docs.InsertTableRequest{
+				Location: &docs.Location{Index: insertIdx},
+				Rows:     tbl.rows,
+				Columns:  tbl.cols,
+			},
+		})
+
+		// Fill cells with content (reverse order within table to avoid shifting)
+		for r := tbl.rows - 1; r >= 0; r-- {
+			for c := tbl.cols - 1; c >= 0; c-- {
+				cellText := ""
+				if r < int64(len(tbl.cells)) && c < int64(len(tbl.cells[r])) {
+					cellText = tbl.cells[r][c]
+				}
+				if cellText == "" {
+					continue
+				}
+
+				// Cell content index in a newly created empty table:
+				// Each cell has 1 newline. Structure per row: row_start + C cells * 2 indices each.
+				// Cell (r, c) content starts at: tableStart + 2 + r*(2*C+1) + 2*c
+				cellIdx := insertIdx + 2 + r*(2*tbl.cols+1) + 2*c
+
+				requests = append(requests, &docs.Request{
+					InsertText: &docs.InsertTextRequest{
+						Location: &docs.Location{Index: cellIdx},
+						Text:     cellText,
+					},
+				})
+			}
+		}
+	}
+
 	return requests
 }
 
@@ -177,7 +239,6 @@ func (b *docBuilder) walkNode(n ast.Node, inBold, inItalic bool, linkURL string)
 		b.addParaStyle(start, end, style)
 
 	case *ast.Paragraph:
-		// Check if parent is a list item — don't add extra newline
 		if n.Parent() != nil && n.Parent().Kind() == ast.KindListItem {
 			b.walkInlineChildren(node, inBold, inItalic, linkURL)
 		} else {
@@ -186,8 +247,6 @@ func (b *docBuilder) walkNode(n ast.Node, inBold, inItalic bool, linkURL string)
 		}
 
 	case *ast.TextBlock:
-		// TextBlock is used for tight list items (instead of Paragraph).
-		// Walk inline children the same way as Paragraph.
 		b.walkInlineChildren(node, inBold, inItalic, linkURL)
 
 	case *ast.List:
@@ -220,19 +279,16 @@ func (b *docBuilder) walkNode(n ast.Node, inBold, inItalic bool, linkURL string)
 		b.walkTable(node)
 
 	case *ast.Blockquote:
-		// Walk children with quote prefix handling
 		for child := node.FirstChild(); child != nil; child = child.NextSibling() {
 			b.walkNode(child, false, false, "")
 		}
 
 	case *extast.Strikethrough:
-		// Strikethrough — render as plain text with tildes for now
 		b.writeText("~")
 		b.walkInlineChildren(node, inBold, inItalic, linkURL)
 		b.writeText("~")
 
 	default:
-		// For any other block node, walk its children
 		if n.HasChildren() {
 			for child := n.FirstChild(); child != nil; child = child.NextSibling() {
 				b.walkNode(child, inBold, inItalic, linkURL)
@@ -278,7 +334,6 @@ func (b *docBuilder) walkInline(n ast.Node, inBold, inItalic bool, linkURL strin
 		b.walkInlineChildren(node, inBold, inItalic, url)
 
 	case *ast.CodeSpan:
-		// Inline code — just render as plain text
 		for child := node.FirstChild(); child != nil; child = child.NextSibling() {
 			if t, ok := child.(*ast.Text); ok {
 				b.writeText(string(t.Segment.Value(b.source)))
@@ -293,7 +348,6 @@ func (b *docBuilder) walkInline(n ast.Node, inBold, inItalic bool, linkURL strin
 		b.addStyle(start, end, inBold, inItalic, url)
 
 	default:
-		// For any other inline, try walking children
 		if n.HasChildren() {
 			b.walkInlineChildren(n, inBold, inItalic, linkURL)
 		}
@@ -301,76 +355,47 @@ func (b *docBuilder) walkInline(n ast.Node, inBold, inItalic bool, linkURL strin
 }
 
 func (b *docBuilder) walkTable(table *extast.Table) {
-	// Collect all rows (header + body)
-	var rows [][]string
+	// Collect all rows and cells as plain text
+	var cells [][]string
+	var numCols int64
 
 	for child := table.FirstChild(); child != nil; child = child.NextSibling() {
 		switch row := child.(type) {
 		case *extast.TableHeader:
-			var cells []string
+			var rowCells []string
 			for cell := row.FirstChild(); cell != nil; cell = cell.NextSibling() {
-				cells = append(cells, b.cellText(cell))
+				rowCells = append(rowCells, b.cellText(cell))
 			}
-			rows = append(rows, cells)
+			if int64(len(rowCells)) > numCols {
+				numCols = int64(len(rowCells))
+			}
+			cells = append(cells, rowCells)
 		case *extast.TableRow:
-			var cells []string
+			var rowCells []string
 			for cell := row.FirstChild(); cell != nil; cell = cell.NextSibling() {
-				cells = append(cells, b.cellText(cell))
+				rowCells = append(rowCells, b.cellText(cell))
 			}
-			rows = append(rows, cells)
+			if int64(len(rowCells)) > numCols {
+				numCols = int64(len(rowCells))
+			}
+			cells = append(cells, rowCells)
 		}
 	}
 
-	if len(rows) == 0 {
+	if len(cells) == 0 || numCols == 0 {
 		return
 	}
 
-	// Calculate column widths
-	numCols := 0
-	for _, row := range rows {
-		if len(row) > numCols {
-			numCols = len(row)
-		}
-	}
-	colWidths := make([]int, numCols)
-	for _, row := range rows {
-		for i, cell := range row {
-			if len(cell) > colWidths[i] {
-				colWidths[i] = len(cell)
-			}
-		}
-	}
-
-	// Render as formatted plain text
-	for i, row := range rows {
-		b.writeText("| ")
-		for j := 0; j < numCols; j++ {
-			cell := ""
-			if j < len(row) {
-				cell = row[j]
-			}
-			b.writeText(cell)
-			// Pad to column width
-			for k := len(cell); k < colWidths[j]; k++ {
-				b.writeText(" ")
-			}
-			b.writeText(" | ")
-		}
-		b.writeText("\n")
-
-		// Add separator after header row
-		if i == 0 {
-			b.writeText("| ")
-			for j := 0; j < numCols; j++ {
-				for k := 0; k < colWidths[j]; k++ {
-					b.writeText("-")
-				}
-				b.writeText(" | ")
-			}
-			b.writeText("\n")
-		}
-	}
+	// Record table position and insert a \n placeholder
+	pos := b.currentIndex()
 	b.writeText("\n")
+
+	b.tables = append(b.tables, tableInfo{
+		charPos: pos,
+		rows:    int64(len(cells)),
+		cols:    numCols,
+		cells:   cells,
+	})
 }
 
 // cellText extracts plain text content from a table cell.
@@ -380,7 +405,6 @@ func (b *docBuilder) cellText(cell ast.Node) string {
 		if t, ok := child.(*ast.Text); ok {
 			text += string(t.Segment.Value(b.source))
 		} else {
-			// Recurse for inline elements
 			text += b.inlineText(child)
 		}
 	}
@@ -401,7 +425,6 @@ func (b *docBuilder) inlineText(n ast.Node) string {
 }
 
 func (b *docBuilder) walkListItem(item *ast.ListItem, ordered bool, index int) {
-	// Add bullet/number prefix
 	if ordered {
 		prefix := string(rune('0'+index)) + ". "
 		if index >= 10 {
@@ -409,10 +432,9 @@ func (b *docBuilder) walkListItem(item *ast.ListItem, ordered bool, index int) {
 		}
 		b.writeText(prefix)
 	} else {
-		b.writeText("• ")
+		b.writeText("\u2022 ") // bullet character
 	}
 
-	// Walk item content
 	for child := item.FirstChild(); child != nil; child = child.NextSibling() {
 		b.walkNode(child, false, false, "")
 	}
