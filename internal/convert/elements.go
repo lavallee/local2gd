@@ -216,6 +216,9 @@ func (b *docBuilder) walkNode(n ast.Node, inBold, inItalic bool, linkURL string)
 		}
 		b.writeText("\n")
 
+	case *extast.Table:
+		b.walkTable(node)
+
 	case *ast.Blockquote:
 		// Walk children with quote prefix handling
 		for child := node.FirstChild(); child != nil; child = child.NextSibling() {
@@ -295,6 +298,106 @@ func (b *docBuilder) walkInline(n ast.Node, inBold, inItalic bool, linkURL strin
 			b.walkInlineChildren(n, inBold, inItalic, linkURL)
 		}
 	}
+}
+
+func (b *docBuilder) walkTable(table *extast.Table) {
+	// Collect all rows (header + body)
+	var rows [][]string
+
+	for child := table.FirstChild(); child != nil; child = child.NextSibling() {
+		switch row := child.(type) {
+		case *extast.TableHeader:
+			var cells []string
+			for cell := row.FirstChild(); cell != nil; cell = cell.NextSibling() {
+				cells = append(cells, b.cellText(cell))
+			}
+			rows = append(rows, cells)
+		case *extast.TableRow:
+			var cells []string
+			for cell := row.FirstChild(); cell != nil; cell = cell.NextSibling() {
+				cells = append(cells, b.cellText(cell))
+			}
+			rows = append(rows, cells)
+		}
+	}
+
+	if len(rows) == 0 {
+		return
+	}
+
+	// Calculate column widths
+	numCols := 0
+	for _, row := range rows {
+		if len(row) > numCols {
+			numCols = len(row)
+		}
+	}
+	colWidths := make([]int, numCols)
+	for _, row := range rows {
+		for i, cell := range row {
+			if len(cell) > colWidths[i] {
+				colWidths[i] = len(cell)
+			}
+		}
+	}
+
+	// Render as formatted plain text
+	for i, row := range rows {
+		b.writeText("| ")
+		for j := 0; j < numCols; j++ {
+			cell := ""
+			if j < len(row) {
+				cell = row[j]
+			}
+			b.writeText(cell)
+			// Pad to column width
+			for k := len(cell); k < colWidths[j]; k++ {
+				b.writeText(" ")
+			}
+			b.writeText(" | ")
+		}
+		b.writeText("\n")
+
+		// Add separator after header row
+		if i == 0 {
+			b.writeText("| ")
+			for j := 0; j < numCols; j++ {
+				for k := 0; k < colWidths[j]; k++ {
+					b.writeText("-")
+				}
+				b.writeText(" | ")
+			}
+			b.writeText("\n")
+		}
+	}
+	b.writeText("\n")
+}
+
+// cellText extracts plain text content from a table cell.
+func (b *docBuilder) cellText(cell ast.Node) string {
+	var text string
+	for child := cell.FirstChild(); child != nil; child = child.NextSibling() {
+		if t, ok := child.(*ast.Text); ok {
+			text += string(t.Segment.Value(b.source))
+		} else {
+			// Recurse for inline elements
+			text += b.inlineText(child)
+		}
+	}
+	return text
+}
+
+// inlineText extracts text from inline nodes recursively.
+func (b *docBuilder) inlineText(n ast.Node) string {
+	var text string
+	for child := n.FirstChild(); child != nil; child = child.NextSibling() {
+		if t, ok := child.(*ast.Text); ok {
+			text += string(t.Segment.Value(b.source))
+		} else {
+			text += b.inlineText(child)
+		}
+	}
+	return text
 }
 
 func (b *docBuilder) walkListItem(item *ast.ListItem, ordered bool, index int) {
