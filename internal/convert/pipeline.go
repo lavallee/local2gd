@@ -3,28 +3,37 @@ package convert
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/lavallee/local2gd/internal/gdrive"
 )
 
+// docNameFromFilename returns the Google Doc name derived from a local filename.
+// "design-notes.md" → "design-notes"
+// "subdir/my-file.md" → "my-file"
+// This ensures the Drive filename matches the local filename for round-tripping.
+func docNameFromFilename(filename string) string {
+	base := filepath.Base(filename)
+	return strings.TrimSuffix(base, ".md")
+}
+
 // CreateDocFromMarkdown converts markdown content and creates a Google Doc.
-// Frontmatter is stripped before conversion and returned separately.
+// The Doc is named after the local filename (not the H1 heading) to ensure
+// round-trip filename consistency.
 // Returns the created file info and the stripped frontmatter (if any).
 func CreateDocFromMarkdown(client *gdrive.Client, folderID string, filename string, mdContent []byte) (gdrive.FileInfo, []byte, error) {
 	body, frontmatter := StripFrontmatter(mdContent)
 
-	requests, title, err := MarkdownToDocs(body)
+	requests, _, err := MarkdownToDocs(body)
 	if err != nil {
 		return gdrive.FileInfo{}, nil, fmt.Errorf("failed to convert markdown: %w", err)
 	}
 
-	if title == "" {
-		title = TitleFromFilename(filepath.Base(filename))
-	}
+	docName := docNameFromFilename(filename)
 
-	info, err := client.CreateDoc(folderID, title, requests)
+	info, err := client.CreateDoc(folderID, docName, requests)
 	if err != nil {
-		return gdrive.FileInfo{}, nil, fmt.Errorf("failed to create doc '%s': %w", title, err)
+		return gdrive.FileInfo{}, nil, fmt.Errorf("failed to create doc '%s': %w", docName, err)
 	}
 
 	return info, frontmatter, nil
@@ -35,22 +44,13 @@ func CreateDocFromMarkdown(client *gdrive.Client, folderID string, filename stri
 func UpdateDocFromMarkdown(client *gdrive.Client, fileID string, filename string, mdContent []byte) ([]byte, error) {
 	body, frontmatter := StripFrontmatter(mdContent)
 
-	requests, title, err := MarkdownToDocs(body)
+	requests, _, err := MarkdownToDocs(body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert markdown: %w", err)
 	}
 
 	if err := client.UpdateDoc(fileID, requests); err != nil {
 		return nil, fmt.Errorf("failed to update doc: %w", err)
-	}
-
-	// Update title if we extracted one
-	if title == "" {
-		title = TitleFromFilename(filepath.Base(filename))
-	}
-	if err := client.UpdateDocTitle(fileID, title); err != nil {
-		// Non-fatal — content is already updated
-		fmt.Printf("Warning: failed to update doc title: %v\n", err)
 	}
 
 	return frontmatter, nil
