@@ -9,11 +9,15 @@ import (
 // docBuilder accumulates plain text and style requests for a Google Doc.
 // Strategy: first pass builds the full text content; second pass applies styles.
 // This avoids the offset-shifting problem with interleaved inserts.
+//
+// IMPORTANT: Google Docs API uses UTF-16 code unit offsets for indexing,
+// not byte offsets. We track charCount separately to match.
 type docBuilder struct {
-	text     []byte          // accumulated plain text
-	styles   []styleRange    // pending style applications
+	text       []byte          // accumulated plain text (UTF-8)
+	charCount  int64           // accumulated UTF-16 code unit count
+	styles     []styleRange    // pending style applications
 	paraStyles []paraStyleRange // pending paragraph style applications
-	source   []byte          // original markdown source
+	source     []byte          // original markdown source
 }
 
 type styleRange struct {
@@ -34,16 +38,31 @@ func newDocBuilder(source []byte) *docBuilder {
 	return &docBuilder{source: source}
 }
 
-// writeText appends text and returns its start index in the document.
-// Note: Google Docs index starts at 1 (index 0 is the document body start).
+// writeText appends text and returns its start index (in UTF-16 code units).
 func (b *docBuilder) writeText(text string) int64 {
-	start := int64(len(b.text))
+	start := b.charCount
 	b.text = append(b.text, []byte(text)...)
+	b.charCount += utf16Len(text)
 	return start
 }
 
 func (b *docBuilder) currentIndex() int64 {
-	return int64(len(b.text))
+	return b.charCount
+}
+
+// utf16Len returns the number of UTF-16 code units needed to represent s.
+// Characters in the Basic Multilingual Plane (U+0000 to U+FFFF) use 1 unit.
+// Characters above U+FFFF (supplementary planes) use 2 units (surrogate pair).
+func utf16Len(s string) int64 {
+	var count int64
+	for _, r := range s {
+		if r >= 0x10000 {
+			count += 2 // surrogate pair
+		} else {
+			count += 1
+		}
+	}
+	return count
 }
 
 func (b *docBuilder) addStyle(start, end int64, bold, italic bool, link string) {

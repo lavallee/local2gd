@@ -244,7 +244,7 @@ func searchStr(s, substr string) bool {
 	return false
 }
 
-// Verify all requests have valid index ranges.
+// Verify all requests have valid index ranges (using UTF-16 length).
 func TestMarkdownToDocs_ValidIndices(t *testing.T) {
 	md := "# Hello\n\nSome **bold** and *italic* [link](http://x.com).\n\n- item\n"
 	requests, _, err := MarkdownToDocs([]byte(md))
@@ -255,7 +255,7 @@ func TestMarkdownToDocs_ValidIndices(t *testing.T) {
 	var totalTextLen int64
 	for _, r := range requests {
 		if r.InsertText != nil {
-			totalTextLen += int64(len(r.InsertText.Text))
+			totalTextLen += utf16Len(r.InsertText.Text)
 		}
 	}
 
@@ -277,6 +277,63 @@ func TestMarkdownToDocs_ValidIndices(t *testing.T) {
 		}
 		if r.UpdateTextStyle != nil {
 			checkRange(r.UpdateTextStyle.Range, "text style")
+		}
+	}
+}
+
+// Test with multi-byte unicode characters (em dashes, smart quotes, etc.)
+func TestMarkdownToDocs_UnicodeCharacters(t *testing.T) {
+	md := "# Healthcare \u2014 Provider Framework\n\nThis is a \u201cquoted\u201d section with an em dash \u2014 and more.\n\n**H\u00e9llo** w\u00f6rld with \u00e0ccents.\n"
+	requests, title, err := MarkdownToDocs([]byte(md))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if title != "Healthcare \u2014 Provider Framework" {
+		t.Errorf("unexpected title: %q", title)
+	}
+
+	// Verify indices are valid (UTF-16 based)
+	var totalUTF16Len int64
+	for _, r := range requests {
+		if r.InsertText != nil {
+			totalUTF16Len += utf16Len(r.InsertText.Text)
+		}
+	}
+
+	for i, r := range requests {
+		check := func(rng *docs.Range, kind string) {
+			if rng.EndIndex > totalUTF16Len+1 {
+				t.Errorf("request %d (%s): end index %d exceeds UTF-16 text length %d",
+					i, kind, rng.EndIndex, totalUTF16Len)
+			}
+		}
+		if r.UpdateParagraphStyle != nil {
+			check(r.UpdateParagraphStyle.Range, "paragraph style")
+		}
+		if r.UpdateTextStyle != nil {
+			check(r.UpdateTextStyle.Range, "text style")
+		}
+	}
+}
+
+func TestUTF16Len(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected int64
+	}{
+		{"hello", 5},
+		{"\u2014", 1},                    // em dash: U+2014, BMP, 1 UTF-16 unit
+		{"\u201cquoted\u201d", 8},        // smart quotes: BMP
+		{"H\u00e9llo", 5},                // accented: BMP
+		{"\U0001F389", 2},                // emoji: U+1F389, supplementary plane, 2 UTF-16 units
+		{"hello \U0001F389 world", 14},   // 6 + 2 + 6
+	}
+
+	for _, tt := range tests {
+		result := utf16Len(tt.input)
+		if result != tt.expected {
+			t.Errorf("utf16Len(%q) = %d, want %d", tt.input, result, tt.expected)
 		}
 	}
 }
