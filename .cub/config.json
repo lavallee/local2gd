@@ -1,0 +1,6 @@
+{
+  "project_id": "local2gd",
+  "backend": {
+    "mode": "jsonl"
+  }
+}

@@ -1,0 +1,18 @@
+# cub
+.cub/ledger/forensics/
+.cub/ledger/by-run/
+.cub/dashboard.db
+.cub/map.md
+.cub/cache/
+.claude/settings.local.json
+
+# Build artifacts
+local2gd
+dist/
+
+# Sync state (contains Drive file IDs and base copies)
+.local2gd/
+
+# Environment
+.env
+.env.local
