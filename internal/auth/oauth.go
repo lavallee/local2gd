@@ -8,37 +8,69 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"time"
 
+	"github.com/adrg/xdg"
+	"github.com/spf13/viper"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/docs/v1"
 	"google.golang.org/api/drive/v3"
 )
 
-// OAuth2 client credentials for an installed (desktop) application.
-// These are not secret — Google's guidance for installed apps is to embed them.
-// Users must create their own Google Cloud project and replace these.
-var (
-	ClientID     = "YOUR_CLIENT_ID.apps.googleusercontent.com"
-	ClientSecret = "YOUR_CLIENT_SECRET"
-)
+// loadCredentials reads OAuth2 client credentials from environment variables.
+// Set LOCAL2GD_CLIENT_ID and LOCAL2GD_CLIENT_SECRET, or add them to
+// ~/.config/local2gd/config.toml under [auth].
+func loadCredentials() (clientID, clientSecret string, err error) {
+	clientID = os.Getenv("LOCAL2GD_CLIENT_ID")
+	clientSecret = os.Getenv("LOCAL2GD_CLIENT_SECRET")
+
+	if clientID != "" && clientSecret != "" {
+		return clientID, clientSecret, nil
+	}
+
+	// Fall back to config file
+	configPath := filepath.Join(xdg.ConfigHome, "local2gd", "config.toml")
+	v := viper.New()
+	v.SetConfigFile(configPath)
+	v.SetConfigType("toml")
+	if err := v.ReadInConfig(); err == nil {
+		if id := v.GetString("auth.client_id"); id != "" {
+			clientID = id
+		}
+		if secret := v.GetString("auth.client_secret"); secret != "" {
+			clientSecret = secret
+		}
+	}
+
+	if clientID == "" || clientSecret == "" {
+		return "", "", fmt.Errorf("OAuth credentials not configured.\n\nSet environment variables:\n  export LOCAL2GD_CLIENT_ID=your-id.apps.googleusercontent.com\n  export LOCAL2GD_CLIENT_SECRET=your-secret\n\nOr add to ~/.config/local2gd/config.toml:\n  [auth]\n  client_id = \"your-id.apps.googleusercontent.com\"\n  client_secret = \"your-secret\"")
+	}
+
+	return clientID, clientSecret, nil
+}
 
 var scopes = []string{
 	drive.DriveScope,
 	docs.DocumentsScope,
 }
 
-func oauthConfig(redirectURL string) *oauth2.Config {
+func oauthConfig(redirectURL string) (*oauth2.Config, error) {
+	clientID, clientSecret, err := loadCredentials()
+	if err != nil {
+		return nil, err
+	}
 	return &oauth2.Config{
-		ClientID:     ClientID,
-		ClientSecret: ClientSecret,
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
 		Scopes:       scopes,
 		Endpoint:     google.Endpoint,
 		RedirectURL:  redirectURL,
-	}
+	}, nil
 }
 
 // Login performs the OAuth2 authorization code flow via a local browser.
@@ -54,7 +86,10 @@ func Login(ctx context.Context) (*oauth2.Token, error) {
 
 	port := listener.Addr().(*net.TCPAddr).Port
 	redirectURL := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
-	cfg := oauthConfig(redirectURL)
+	cfg, err := oauthConfig(redirectURL)
+	if err != nil {
+		return nil, err
+	}
 
 	// Generate state parameter for CSRF protection
 	stateBytes := make([]byte, 16)
@@ -124,11 +159,14 @@ func Login(ctx context.Context) (*oauth2.Token, error) {
 
 // TokenClient returns an HTTP client that uses the given token and auto-refreshes it.
 // The onRefresh callback is called when the token is refreshed, allowing callers to persist it.
-func TokenClient(ctx context.Context, token *oauth2.Token, onRefresh func(*oauth2.Token)) *http.Client {
-	cfg := oauthConfig("") // redirect URL not needed for token refresh
+func TokenClient(ctx context.Context, token *oauth2.Token, onRefresh func(*oauth2.Token)) (*http.Client, error) {
+	cfg, err := oauthConfig("") // redirect URL not needed for token refresh
+	if err != nil {
+		return nil, err
+	}
 	src := cfg.TokenSource(ctx, token)
 	src = &notifyTokenSource{base: src, onRefresh: onRefresh, lastToken: token}
-	return oauth2.NewClient(ctx, src)
+	return oauth2.NewClient(ctx, src), nil
 }
 
 // notifyTokenSource wraps a TokenSource and calls onRefresh when the token changes.

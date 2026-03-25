@@ -118,8 +118,26 @@ To use local2gd, you need a Google Cloud project with the Drive and Docs APIs en
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
 2. Create a new project
 3. Enable the **Google Drive API** and **Google Docs API**
-4. Create OAuth 2.0 credentials (Desktop application)
-5. Set the Client ID and Secret in the source code (`internal/auth/oauth.go`) and rebuild
+4. Configure the OAuth consent screen (External, add your email as a test user)
+5. Create **OAuth 2.0 credentials** → Desktop application
+6. Configure credentials via environment variables or config file:
+
+**Option A: Environment variables**
+```bash
+export LOCAL2GD_CLIENT_ID=your-id.apps.googleusercontent.com
+export LOCAL2GD_CLIENT_SECRET=your-secret
+```
+
+**Option B: Config file** (`~/.config/local2gd/config.toml`)
+```toml
+[auth]
+client_id = "your-id.apps.googleusercontent.com"
+client_secret = "your-secret"
+
+[pairings.notes]
+local = "~/Documents/notes"
+remote = "Notes"
+```
 
 ## License
 

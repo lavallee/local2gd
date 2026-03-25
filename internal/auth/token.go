@@ -84,12 +84,15 @@ func Client(ctx context.Context) (*http.Client, error) {
 		return nil, err
 	}
 
-	client := TokenClient(ctx, token, func(newToken *oauth2.Token) {
+	client, err := TokenClient(ctx, token, func(newToken *oauth2.Token) {
 		slog.Debug("Token refreshed, saving...")
 		if err := SaveToken(newToken); err != nil {
 			slog.Error("Failed to save refreshed token", "error", err)
 		}
 	})
+	if err != nil {
+		return nil, err
+	}
 
 	return client, nil
 }
