@@ -185,6 +185,11 @@ func (b *docBuilder) walkNode(n ast.Node, inBold, inItalic bool, linkURL string)
 			b.writeText("\n")
 		}
 
+	case *ast.TextBlock:
+		// TextBlock is used for tight list items (instead of Paragraph).
+		// Walk inline children the same way as Paragraph.
+		b.walkInlineChildren(node, inBold, inItalic, linkURL)
+
 	case *ast.List:
 		for child := node.FirstChild(); child != nil; child = child.NextSibling() {
 			if item, ok := child.(*ast.ListItem); ok {
