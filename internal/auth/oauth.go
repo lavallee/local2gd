@@ -33,12 +33,19 @@ func loadCredentials() (clientID, clientSecret string, err error) {
 		return clientID, clientSecret, nil
 	}
 
-	// Fall back to config file
-	configPath := filepath.Join(xdg.ConfigHome, "local2gd", "config.toml")
+	// Fall back to config file — check multiple locations
 	v := viper.New()
-	v.SetConfigFile(configPath)
 	v.SetConfigType("toml")
-	if err := v.ReadInConfig(); err == nil {
+	configFound := false
+	for _, dir := range configDirs() {
+		path := filepath.Join(dir, "local2gd", "config.toml")
+		v.SetConfigFile(path)
+		if err := v.ReadInConfig(); err == nil {
+			configFound = true
+			break
+		}
+	}
+	if configFound {
 		if id := v.GetString("auth.client_id"); id != "" {
 			clientID = id
 		}
@@ -52,6 +59,18 @@ func loadCredentials() (clientID, clientSecret string, err error) {
 	}
 
 	return clientID, clientSecret, nil
+}
+
+// configDirs returns candidate config directories in priority order.
+func configDirs() []string {
+	home, _ := os.UserHomeDir()
+	dirs := []string{xdg.ConfigHome}
+	// Always check ~/.config as a fallback (common on macOS despite XDG spec)
+	dotConfig := filepath.Join(home, ".config")
+	if dotConfig != xdg.ConfigHome {
+		dirs = append(dirs, dotConfig)
+	}
+	return dirs
 }
 
 var scopes = []string{

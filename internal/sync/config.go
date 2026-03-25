@@ -2,6 +2,7 @@ package sync
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/adrg/xdg"
@@ -10,16 +11,22 @@ import (
 
 // LoadConfig reads the config file and returns all pairing configurations.
 func LoadConfig() ([]PairingConfig, error) {
-	configPath := filepath.Join(xdg.ConfigHome, "local2gd", "config.toml")
-
 	v := viper.New()
-	v.SetConfigFile(configPath)
 	v.SetConfigType("toml")
 
-	if err := v.ReadInConfig(); err != nil {
-		dir := filepath.Dir(configPath)
-		return nil, fmt.Errorf("failed to read config at %s: %w\n\nCreate a config file:\n\n  mkdir -p %s\n  cat > %s << 'EOF'\n  [pairings.notes]\n  local = \"~/Documents/notes\"\n  remote = \"Notes\"\n  EOF",
-			configPath, err, dir, configPath)
+	var configPath string
+	found := false
+	for _, dir := range ConfigDirs() {
+		configPath = filepath.Join(dir, "local2gd", "config.toml")
+		v.SetConfigFile(configPath)
+		if err := v.ReadInConfig(); err == nil {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return nil, fmt.Errorf("no config file found.\n\nCreate ~/.config/local2gd/config.toml:\n\n  mkdir -p ~/.config/local2gd\n  cat > ~/.config/local2gd/config.toml << 'EOF'\n  [auth]\n  client_id = \"your-id\"\n  client_secret = \"your-secret\"\n\n  [pairings.notes]\n  local = \"~/Documents/notes\"\n  remote = \"Notes\"\n  EOF")
 	}
 
 	pairings := v.GetStringMap("pairings")
@@ -59,6 +66,17 @@ func FindPairing(configs []PairingConfig, name string) (*PairingConfig, error) {
 		names = append(names, c.Name)
 	}
 	return nil, fmt.Errorf("pairing '%s' not found. Available: %v", name, names)
+}
+
+// ConfigDirs returns candidate config directories in priority order.
+func ConfigDirs() []string {
+	home, _ := os.UserHomeDir()
+	dirs := []string{xdg.ConfigHome}
+	dotConfig := filepath.Join(home, ".config")
+	if dotConfig != xdg.ConfigHome {
+		dirs = append(dirs, dotConfig)
+	}
+	return dirs
 }
 
 // ConfigPath returns the path where the config file should be.
